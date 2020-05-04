@@ -147,7 +147,7 @@ class MassMailingCampaign(models.Model):
     _rec_name = "campaign_id"
     _inherits = {'utm.campaign': 'campaign_id'}
 
-    stage_id = fields.Many2one('mail.mass_mailing.stage', string='Stage', required=True, 
+    stage_id = fields.Many2one('mail.mass_mailing.stage', string='Stage', required=True,
         default=lambda self: self.env['mail.mass_mailing.stage'].search([], limit=1))
     user_id = fields.Many2one(
         'res.users', string='Responsible',
@@ -155,9 +155,9 @@ class MassMailingCampaign(models.Model):
     campaign_id = fields.Many2one('utm.campaign', 'campaign_id',
         required=True, ondelete='cascade',  help="This name helps you tracking your different campaign efforts, e.g. Fall_Drive, Christmas_Special")
     source_id = fields.Many2one('utm.source', string='Source',
-            help="This is the link source, e.g. Search Engine, another domain,or name of email list", default=lambda self: self.env.ref('utm.utm_source_newsletter'))
+            help="This is the link source, e.g. Search Engine, another domain,or name of email list", default=lambda self: self.env.ref('utm.utm_source_newsletter', False))
     medium_id = fields.Many2one('utm.medium', string='Medium',
-            help="This is the delivery method, e.g. Postcard, Email, or Banner Ad", default=lambda self: self.env.ref('utm.utm_medium_email'))
+            help="This is the delivery method, e.g. Postcard, Email, or Banner Ad", default=lambda self: self.env.ref('utm.utm_medium_email', False))
     tag_ids = fields.Many2many(
         'mail.mass_mailing.tag', 'mail_mass_mailing_tag_rel',
         'tag_id', 'campaign_id', string='Tags')
@@ -578,7 +578,22 @@ class MassMailing(models.Model):
         blacklist = {}
         target = self.env[self.mailing_model_real]
         mail_field = 'email' if 'email' in target._fields else 'email_from'
-        if 'opt_out' in target._fields:
+        if self.mailing_model_real == "mail.mass_mailing.contact":
+            # If user is opt_out on One list but not on another or if two user
+            # with same email address, one opted in and the other one
+            # opted out, send the mail anyway
+            query = """
+                SELECT lower(substring(email, '([^ ,;<@]+@[^> ,;]+)')), opt_out
+                FROM mail_mass_mailing_contact
+                INNER JOIN mail_mass_mailing_contact_list_rel lr ON
+                    lr.list_id IN %s AND lr.contact_id = id;
+            """
+            self._cr.execute(query, (tuple(self.contact_list_ids.ids),))
+            contacts = self._cr.fetchall()
+            opt_out_contacts = {c[0] for c in contacts if c[1]}
+            opt_in_contacts = {c[0] for c in contacts if not c[1]}
+            blacklist = opt_out_contacts - opt_in_contacts
+        elif 'opt_out' in target._fields:
             # avoid loading a large number of records in memory
             # + use a basic heuristic for extracting emails
             query = """
@@ -590,11 +605,12 @@ class MassMailing(models.Model):
             query = query % {'target': target._table, 'mail_field': mail_field}
             self._cr.execute(query)
             blacklist = set(m[0] for m in self._cr.fetchall())
+        else:
+            _logger.info("Mass-mailing %s targets %s, no blacklist available", self, target._name)
+        if blacklist:
             _logger.info(
                 "Mass-mailing %s targets %s, blacklist: %s emails",
                 self, target._name, len(blacklist))
-        else:
-            _logger.info("Mass-mailing %s targets %s, no blacklist available", self, target._name)
         return blacklist
 
     def _get_convert_links(self):
@@ -616,15 +632,28 @@ class MassMailing(models.Model):
         """Returns a set of emails already targeted by current mailing/campaign (no duplicates)"""
         self.ensure_one()
         target = self.env[self.mailing_model_real]
-        mail_field = 'email' if 'email' in target._fields else 'email_from'
-        # avoid loading a large number of records in memory
-        # + use a basic heuristic for extracting emails
-        query = """
-            SELECT lower(substring(%(mail_field)s, '([^ ,;<@]+@[^> ,;]+)'))
-              FROM mail_mail_statistics s
-              JOIN %(target)s t ON (s.res_id = t.id)
-             WHERE substring(%(mail_field)s, '([^ ,;<@]+@[^> ,;]+)') IS NOT NULL
-        """
+        if set(['email', 'email_from']) & set(target._fields):
+            mail_field = 'email' if 'email' in target._fields else 'email_from'
+            # avoid loading a large number of records in memory
+            # + use a basic heuristic for extracting emails
+            query = """
+                SELECT lower(substring(%(mail_field)s, '([^ ,;<@]+@[^> ,;]+)'))
+                  FROM mail_mail_statistics s
+                  JOIN %(target)s t ON (s.res_id = t.id)
+                 WHERE substring(%(mail_field)s, '([^ ,;<@]+@[^> ,;]+)') IS NOT NULL
+            """
+        elif 'partner_id' in target._fields:
+            mail_field = 'email'
+            query = """
+                SELECT lower(substring(p.%(mail_field)s, '([^ ,;<@]+@[^> ,;]+)'))
+                  FROM mail_mail_statistics s
+                  JOIN %(target)s t ON (s.res_id = t.id)
+                  JOIN res_partner p ON (t.partner_id = p.id)
+                 WHERE substring(p.%(mail_field)s, '([^ ,;<@]+@[^> ,;]+)') IS NOT NULL
+            """
+        else:
+            raise UserError(_("Unsupported mass mailing model %s") % self.mailing_model_id.name)
+
         if self.mass_mailing_campaign_id.unique_ab_testing:
             query +="""
                AND s.mass_mailing_campaign_id = %%(mailing_campaign_id)s;
