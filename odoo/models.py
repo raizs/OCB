@@ -3112,6 +3112,9 @@ class BaseModel(MetaModel('DummyModel', (object,), {'_register': False})):
         if not self:
             return True
 
+        if not vals:
+            _logger.warn('Raizs: Empty Vals %s' % vals)
+
         self._check_concurrency()
         self.check_access_rights('write')
 
