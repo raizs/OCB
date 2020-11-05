@@ -33,6 +33,7 @@ import operator
 import pytz
 import re
 import uuid
+import traceback
 from collections import defaultdict, MutableMapping, OrderedDict
 from contextlib import closing
 from inspect import getmembers, currentframe
@@ -3111,6 +3112,10 @@ class BaseModel(MetaModel('DummyModel', (object,), {'_register': False})):
         """
         if not self:
             return True
+
+        if not vals:
+            _logger.warn('Raizs: Empty Vals %s' % vals)
+            traceback.print_stack()
 
         self._check_concurrency()
         self.check_access_rights('write')
